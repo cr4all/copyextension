@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Follow me (westace)",
+  "version": "0.1.0",
+  "description": "Capture westace betting requests and forward them to a Socket.IO server.",
+  "action": {
+    "default_title": "Follow me",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["webRequest", "storage", "alarms", "offscreen"],
+  "host_permissions": ["<all_urls>"],
+  "web_accessible_resources": [
+    {
+      "resources": ["offscreen.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
+

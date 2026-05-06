@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Follow me</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="title">Follow me</div>
+      <div id="statusBadge" class="badge badge--stopped">stopped</div>
+    </header>
+
+    <main class="main">
+      <label class="field">
+        <div class="field__label">Socket.IO URL</div>
+        <input id="wsUrl" class="input" placeholder="http://127.0.0.1:9001" />
+      </label>
+
+      <label class="field">
+        <div class="field__label">Auth Token</div>
+        <input id="authToken" class="input" placeholder="token" />
+      </label>
+
+      <div class="buttons">
+        <button id="startBtn" class="btn btn--primary">Start</button>
+        <button id="stopBtn" class="btn" disabled>Stop</button>
+        <button id="clearLogBtn" class="btn btn--ghost" title="Clear logs">Clear</button>
+      </div>
+
+      <section class="log">
+        <div class="log__header">
+          <div class="log__title">Logs</div>
+          <div id="connState" class="log__meta">—</div>
+        </div>
+        <pre id="logBox" class="log__box"></pre>
+      </section>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
+

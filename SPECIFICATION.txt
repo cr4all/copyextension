@@ -1,0 +1,184 @@
+Follow me (westace) Chrome Extension — Requirements / technical spec (MV3)
+
+## 0. Document purpose
+- Detect specific network requests that occur during sports betting on `westace.com` and send the original request data to a configured Socket.IO server.
+- This document is the authoritative spec for the Chrome extension; an implementer should be able to develop and test using this document alone.
+
+## 1. Scope / assumptions
+- **Platform**: Chrome Extension (Manifest V3)
+- **Detection (capture)**: Observation via `chrome.webRequest` events
+- **Transport**: Socket.IO over `http://` or `https://` (websocket/polling internally), JSON messages to a single server
+- **Captured request kinds**: `to_bet_slip`, `place_bet`
+- **Bookmaker id (`bookmaker`)**: fixed value `westace`
+
+## 2. Definitions
+- **Capture**: Detect an HTTP request the browser is about to send using `webRequest`, and extract URL, query, and request body.
+- **Payload**: The full captured “request data”; minimum fields include `url`, `method`, `query`, and `body`.
+- **Run state**: `stopped` / `running`
+
+## 3. User interface requirements
+### 3.1 Screen layout
+- **Socket.IO server URL**: e.g. `https://example.com` or `http://127.0.0.1:9001` (path allowed when needed)
+- **Auth token**: string used for server auth (maps to the `token` field in the outbound format below)
+- **Start**: begin detection + forwarding
+- **Stop**: stop detection + forwarding (close connection)
+- **Log area**: satisfy the “Logging requirements” section below
+
+### 3.2 UX behavior
+- If URL or token is empty on start, do not start (show a clear error).
+- While `running`, restrict editing inputs (recommended) or show that a restart is required after changes.
+- On stop: stop capture immediately, close the Socket.IO connection, and discard or retain queued messages per policy (default: see 6.4).
+
+## 4. Capture (detection) requirements
+### 4.1 Target endpoints
+Capture when the browser issues requests matching the URL patterns below.
+
+- `to_bet_slip`
+  - Example: `https://auth-241o-sp.sbx.bet/241/en/to_bet_slip?player_id=[player.id]`
+- `place_bet`
+  - Example: `https://auth-241o-sp.sbx.bet/241/en/place_bet?token=[...token...]&franchise=241&countryCode=lt&player_id=[player.id]`
+
+#### Identification rules (recommended)
+- **URL path contains `/to_bet_slip`** → kind = `to_bet_slip`
+- **URL path contains `/place_bet`** → kind = `place_bet`
+- Do not filter by HTTP method alone; GET/POST may vary with the site.
+
+### 4.2 Captured data (MV3 / webRequest)
+Minimum fields (required):
+- `url` (full URL string)
+- `method`
+- `query` (query object parsed from the URL)
+- `body` (request body when available)
+
+Body capture policy:
+- If `details.requestBody.formData` exists, convert it to an object.
+- If only `details.requestBody.raw` is present (binary/JSON, etc.): encode bytes as a **Base64 string**, set `bodyEncoding = "base64"`.
+- If no request body is provided: send `body = null`, `bodyEncoding = null`.
+
+Notes / limits:
+- `webRequest` does not expose response bodies by default; this feature targets **request** data only.
+- Large bodies may occur; apply max size and truncation (see 6.5).
+
+## 5. Socket.IO transport requirements
+### 5.1 Send trigger
+- While `running`, when a target request is detected, attempt send immediately.
+- If Socket.IO is not connected, enqueue and attempt reconnect (6.3, 6.4).
+- **Emit** the JSON object below on event name **`NEWTIP`** (server: `socket.on("NEWTIP", ...)`).
+
+### 5.2 Message format (JSON)
+Standard shape for one outbound message (aligned with current `background.js`):
+
+```json
+{
+  "type": "NEWTIP",
+  "token": "<auth-token>",
+  "data": {
+    "bookmaker": "westace",
+    "kind": 0,
+    "opbookmaker": "copybot",
+    "payload": {
+      "kind": "to_bet_slip",
+      "url": "https://.../to_bet_slip?player_id=123",
+      "method": "POST",
+      "query": { "player_id": "123" },
+      "bodyEncoding": "json|form|base64|null",
+      "body": { "example": "..." },
+      "capturedAt": "2026-04-30T06:00:00.000Z",
+      "tabId": 123
+    }
+  }
+}
+```
+
+Field definitions:
+- `type`: fixed `"NEWTIP"`
+- `token`: auth token from the UI (must not be empty)
+- `data.bookmaker`: fixed `"westace"`
+- `data.kind` / `data.opbookmaker`: implementation-specific routing fields (see code)
+- `data.payload`:
+  - `kind`: `"to_bet_slip"` or `"place_bet"`
+  - `url`: full URL
+  - `method`: HTTP method string
+  - `query`: object parsed from the query string (duplicate keys may become arrays)
+  - `bodyEncoding`:
+    - `"form"`: object from formData
+    - `"json"`: request body parsed as JSON when possible (prefer object)
+    - `"base64"`: raw bytes as base64 string
+    - `null`: no body
+  - `body`: object, base64 string, or `null` per `bodyEncoding`
+  - `capturedAt`: ISO-8601 UTC timestamp
+  - `tabId`: originating tab id when available
+
+### 5.3 Masking / sensitive data (transport + logs)
+- Prefer preserving originals on the wire, but masking is recommended for:
+  - query `token` (e.g. `place_bet?token=...`)
+  - token/session/sensitive fields inside the body (pattern-based)
+- Logs must only show masked values (e.g. first 4 + `***` + last 4).
+- Store the UI auth token in `chrome.storage.local`; do not use synced storage.
+
+## 6. Connection / queue / retry (including MV3 limits)
+### 6.1 MV3 service worker limits
+- Service workers may stop when idle, so a single worker alone is a poor place for a “always-on” Socket.IO client.
+
+Recommended architecture:
+- **Capture in the service worker** (`webRequest` events)
+- **Keep the Socket.IO connection in an Offscreen Document** and pass payloads via runtime messages
+
+### 6.2 State machine (recommended)
+- `disconnected` → `connecting` → `connected` → (error/close) → `backoff` → `connecting` …
+- Surface current state in the UI (connected/disconnected and last error).
+
+### 6.3 Reconnect (backoff)
+- On failure/disconnect, exponential backoff starting at min 1s (e.g. 1s, 2s, 4s, 8s …).
+- Cap backoff at 30s.
+- If the user clicks **Stop**, stop reconnect attempts immediately.
+
+### 6.4 Message queue (when not connected)
+- Enqueue messages captured while Socket.IO is disconnected.
+- Default policy (recommended):
+  - Cap queue size at N (e.g. 200), drop oldest on overflow
+  - On reconnect, send FIFO
+  - On **Stop**, discard the queue (optional: persist / resend on next start)
+
+### 6.5 Payload size limits
+- Very large `payload.body` (e.g. > 1MB) can fail or slow delivery.
+- Default policy (recommended):
+  - If over threshold, truncate even base64/raw, set `payload.truncated = true`, add `payload.originalSizeBytes`.
+
+## 7. Logging requirements
+- Log (with timestamps): start/stop; Socket.IO connect/fail/disconnect/retry (including backoff); capture events (kind / URL summary / tab); send success/failure (reason).
+- Never log raw tokens or other sensitive values (see 5.3).
+- Keep only the last N lines (e.g. 500); optional **Clear** action.
+
+## 8. Permissions / manifest (draft)
+### 8.1 permissions (example)
+- `webRequest` (observe requests)
+- `storage` (settings / token)
+- `alarms` (reconnect / wake worker)
+- (optional) `offscreen` (when using an Offscreen Document)
+
+### 8.2 host_permissions (example)
+- Capture-related hosts (tune to real domains):
+  - `*://westace.com/*`
+  - `*://auth-241o-sp.sbx.bet/*`
+
+### 8.3 webRequest extraInfoSpec
+- Request `requestBody` on `onBeforeRequest` to read bodies.
+
+## 9. Test plan
+### 9.1 Local / dev
+- Run a local Socket.IO echo server (e.g. `http://127.0.0.1:9001`) and verify connect/reconnect/queue in the extension.
+- Stop the server on purpose (backoff): queue fills, then FIFO drain after restart.
+
+### 9.2 Live site (westace)
+- Exercise betting on `westace.com` and verify capture/send for:
+  - `.../to_bet_slip...`
+  - `.../place_bet...`
+- Cover both POST (with requestBody) and GET (no body) where applicable.
+- With multiple tabs, verify `tabId` distinguishes traffic in logs/sends.
+
+### 9.3 Security / masking
+- When `token` appears in query/body, confirm the UI log shows masked values only.
+
+## 10. Future work (out of scope)
+- Other bookmakers, multiple Socket.IO destinations, collecting response bodies (not in scope now)
