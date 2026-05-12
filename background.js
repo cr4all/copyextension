@@ -9,15 +9,6 @@ const LOG_LIMIT = 500;
 // If you want to restrict permissions later, narrow manifest host_permissions and this filter together.
 const CAPTURE_URLS = ["<all_urls>"];
 
-/** Gambana betslip slug poll interval (ms). Betslip DOM clears after place; cache last scrape per tab. */
-const GAMBANA_SLUG_POLL_MS = 3000;
-
-/** @type {Map<number, { slugs: string[]; updatedAt: string }>} */
-const gambanaSlugCacheByTab = new Map();
-
-/** @type {ReturnType<typeof setInterval> | null} */
-let gambanaSlugPollTimer = null;
-
 /** @type {string[]} */
 let logs = [];
 
@@ -200,196 +191,6 @@ function matchCaptureTarget(url) {
   return null;
 }
 
-/**
- * DOM scrape only (no logging). Used by poller and by verbose extract wrapper.
- * @param {number} tabId
- * @returns {Promise<string[]>}
- */
-async function scrapeGambanaBetslipSlugsFromTab(tabId) {
-  if (typeof tabId !== "number" || tabId < 0) {
-    return [];
-  }
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      func: () => {
-        const diag = {
-          frameUrl: (() => {
-            try {
-              return String(window.location?.href ?? "").slice(0, 200);
-            } catch {
-              return "";
-            }
-          })(),
-          selectorMatchCount: 0,
-          anchorHrefSamples: /** @type {string[]} */ ([]),
-          parseErrors: /** @type {string[]} */ ([]),
-          skippedEmptyLast: 0,
-          skippedDuplicate: 0,
-          slugs: /** @type {string[]} */ ([]),
-        };
-
-        const nodes = document.querySelectorAll('[data-editor-id="betslipSelection"] a[href]');
-        diag.selectorMatchCount = nodes.length;
-
-        let sample = 0;
-        const seen = new Set();
-        for (const a of nodes) {
-          const rawHref = a.getAttribute("href") || a.href || "";
-          if (sample < 5 && rawHref) {
-            diag.anchorHrefSamples.push(String(rawHref).slice(0, 240));
-            sample += 1;
-          }
-          try {
-            const u = new URL(rawHref, document.baseURI);
-            const segments = u.pathname.split("/").filter(Boolean);
-            const last = segments[segments.length - 1];
-            if (!last) {
-              diag.skippedEmptyLast += 1;
-              continue;
-            }
-            const slug = last.replace(/-\d{10,}$/, "") || last;
-            if (!slug) {
-              diag.skippedEmptyLast += 1;
-              continue;
-            }
-            if (seen.has(slug)) {
-              diag.skippedDuplicate += 1;
-              continue;
-            }
-            seen.add(slug);
-            diag.slugs.push(slug);
-          } catch (err) {
-            if (diag.parseErrors.length < 5) {
-              diag.parseErrors.push(String(err?.message || err).slice(0, 120));
-            }
-          }
-        }
-        return diag;
-      },
-    });
-
-    if (!Array.isArray(results) || results.length === 0) {
-      return [];
-    }
-
-    /** @type {string[]} */
-    const mergedSlugs = [];
-    const seenMerged = new Set();
-    for (let fi = 0; fi < results.length; fi += 1) {
-      const inj = results[fi];
-      const r = inj?.result;
-      if (inj?.error || !r || typeof r !== "object") continue;
-
-      const frameSlugs = Array.isArray(r.slugs) ? r.slugs : [];
-      for (const s of frameSlugs) {
-        if (typeof s !== "string" || !s) continue;
-        if (seenMerged.has(s)) continue;
-        seenMerged.add(s);
-        mergedSlugs.push(s);
-      }
-    }
-    return mergedSlugs;
-  } catch {
-    return [];
-  }
-}
-
-function tabUrlLooksLikeGambanaBook(url) {
-  if (typeof url !== "string" || !url.trim()) return false;
-  try {
-    const h = new URL(url).hostname.toLowerCase();
-    return h.includes("gambana");
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Poll open tabs; refresh per-tab cache only when scrape finds slugs (slip cleared after place keeps last slugs).
- */
-async function pollGambanaSlugCachesOnce() {
-  let tabs;
-  try {
-    tabs = await chrome.tabs.query({});
-  } catch {
-    return;
-  }
-  for (const tab of tabs) {
-    const id = tab.id;
-    if (typeof id !== "number" || id < 0) continue;
-    if (!tabUrlLooksLikeGambanaBook(tab.url ?? "")) continue;
-    const slugs = await scrapeGambanaBetslipSlugsFromTab(id);
-    if (slugs.length > 0) {
-      gambanaSlugCacheByTab.set(id, { slugs, updatedAt: isoNow() });
-      dbg("gambanaSlugPoll", { tabId: id, count: slugs.length });
-    }
-  }
-}
-
-function startGambanaSlugPoller() {
-  if (gambanaSlugPollTimer != null) return;
-  void pollGambanaSlugCachesOnce();
-  gambanaSlugPollTimer = setInterval(() => {
-    void pollGambanaSlugCachesOnce();
-  }, GAMBANA_SLUG_POLL_MS);
-  dbg("gambanaSlugPoller started", GAMBANA_SLUG_POLL_MS);
-}
-
-function stopGambanaSlugPoller() {
-  if (gambanaSlugPollTimer != null) {
-    clearInterval(gambanaSlugPollTimer);
-    gambanaSlugPollTimer = null;
-  }
-  gambanaSlugCacheByTab.clear();
-  dbg("gambanaSlugPoller stopped");
-}
-
-/**
- * Read Gambana betslip selection links from the tab (DOM scrape). Uses same scrape as poller.
- * @param {number | undefined} tabId
- * @param {{ verbose?: boolean }} [opts]
- * @returns {Promise<{ slugs: string[] }>}
- */
-async function extractGambanaBetslipSlugs(tabId, opts = {}) {
-  const verbose = Boolean(opts.verbose);
-  const tag = "[gambana-slug]";
-  if (verbose) {
-    pushLog(`${isoNow()} ${tag} step=start tabId=${String(tabId)} typeof=${typeof tabId}`);
-  }
-
-  if (typeof tabId !== "number" || tabId < 0) {
-    if (verbose) {
-      pushLog(
-        `${isoNow()} ${tag} step=skip_invalid_tab reason=not_a_number_or_negative tabId=${String(tabId)}`,
-      );
-    }
-    return { slugs: [] };
-  }
-
-  if (verbose) {
-    pushLog(`${isoNow()} ${tag} step=before_scrape tabId=${tabId}`);
-  }
-
-  try {
-    const slugs = await scrapeGambanaBetslipSlugsFromTab(tabId);
-    if (verbose) {
-      if (slugs.length > 0) {
-        pushLog(`${isoNow()} ${tag} step=done_ok count=${slugs.length} slugs=${JSON.stringify(slugs)}`);
-      } else {
-        pushLog(`${isoNow()} ${tag} step=done_empty slugs=[]`);
-      }
-    }
-    return { slugs };
-  } catch (e) {
-    if (verbose) {
-      pushLog(`${isoNow()} ${tag} step=scrape_throw err=${String(e)}`);
-    }
-    dbg("extractGambanaBetslipSlugs", String(e));
-    return { slugs: [] };
-  }
-}
-
 async function forwardCaptured(details) {
   try {
     const target = matchCaptureTarget(details.url);
@@ -407,42 +208,6 @@ async function forwardCaptured(details) {
     }
 
     const payload = { ...buildPayload(details), kind: target.payloadKind };
-    if (target.bookmaker === "gambana" && target.payloadKind === "place_bet") {
-      const tid = details.tabId;
-      /** @type {string[]} */
-      let slugs = [];
-      let source = "none";
-
-      if (typeof tid === "number" && tid >= 0) {
-        const cached = gambanaSlugCacheByTab.get(tid);
-        if (cached?.slugs?.length) {
-          slugs = [...cached.slugs];
-          source = "cache";
-          pushLog(
-            `${isoNow()} [gambana-slug] step=forward_payload source=cache tabId=${tid} count=${slugs.length} updatedAt=${cached.updatedAt}`,
-          );
-        }
-      }
-
-      if (slugs.length === 0) {
-        const { slugs: live } = await extractGambanaBetslipSlugs(tid, { verbose: false });
-        if (live.length > 0) {
-          slugs = live;
-          source = "live";
-          pushLog(
-            `${isoNow()} [gambana-slug] step=forward_payload source=live tabId=${String(tid)} count=${slugs.length}`,
-          );
-        }
-      }
-
-      if (slugs.length > 0) {
-        payload.eventSlugs = slugs;
-      } else {
-        pushLog(
-          `${isoNow()} [gambana-slug] step=forward_payload no_eventSlugs source=${source} tabId=${String(tid)}`,
-        );
-      }
-    }
 
     const msg = {
       type: "NEWTIP",
@@ -479,22 +244,6 @@ async function forwardCaptured(details) {
 }
 
 dbg("service worker loaded", { captureUrls: CAPTURE_URLS });
-
-chrome.tabs.onRemoved.addListener((tabId) => {
-  gambanaSlugCacheByTab.delete(tabId);
-});
-
-void (async () => {
-  try {
-    const settings = await getSettings();
-    if (settings.running) {
-      startGambanaSlugPoller();
-    }
-  } catch {
-    // ignore
-  }
-})();
-
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     void forwardCaptured(details);
@@ -559,7 +308,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       await setRunning(true);
       pushLog(`${isoNow()} [state] start requested ws=${wsUrl}`);
       dbg("START", { wsUrl, token: "***" });
-      startGambanaSlugPoller();
 
       try {
         await ensureOffscreen();
@@ -575,7 +323,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     if (message.type === "STOP") {
-      stopGambanaSlugPoller();
       await setRunning(false);
       pushLog(`${isoNow()} [state] stop requested`);
       dbg("STOP");
