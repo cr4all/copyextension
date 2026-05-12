@@ -173,20 +173,27 @@ function buildPayload(details) {
   return payload;
 }
 
-function inferKind(url) {
-  if (url.includes("/to_bet_slip")) return "to_bet_slip";
-  if (url.includes("/place_bet")) return "place_bet";
+/**
+ * @returns {{ bookmaker: string; payloadKind: string } | null}
+ */
+function matchCaptureTarget(url) {
+  if (typeof url !== "string") return null;
+  const u = url.toLowerCase();
+  if (u.includes("auth-241o-sp.sbx.bet")) {
+    if (u.includes("/to_bet_slip")) return { bookmaker: "westace", payloadKind: "to_bet_slip" };
+    if (u.includes("/place_bet")) return { bookmaker: "westace", payloadKind: "place_bet" };
+    return null;
+  }
+  // Gambana sportsbook → Betby CDN (see mainbot `GAMBANA_BETBY_PLACE_URL`)
+  if (u.includes("sptpub.com") && u.includes("/bet/place")) {
+    return { bookmaker: "gambana", payloadKind: "place_bet" };
+  }
   return null;
 }
 
-function isTargetUrl(url) {
-  if (typeof url !== "string") return false;
-  if (!url.includes("auth-241o-sp.sbx.bet")) return false;
-  return url.includes("/to_bet_slip") || url.includes("/place_bet");
-}
-
 async function forwardCaptured(details) {
-  if (!isTargetUrl(details.url)) return;
+  const target = matchCaptureTarget(details.url);
+  if (!target) return;
   dbg("onBeforeRequest", {
     url: maskUrl(details.url),
     method: details.method,
@@ -199,18 +206,12 @@ async function forwardCaptured(details) {
     return;
   }
 
-  const kind = inferKind(details.url);
-  if (!kind) {
-    dbg("skip capture: kind not matched");
-    return;
-  }
-
-  const payload = { ...buildPayload(details), kind };
+  const payload = { ...buildPayload(details), kind: target.payloadKind };
   const msg = {
     type: "NEWTIP",
     token: settings.token,
     data: {
-      bookmaker: "westace",
+      bookmaker: target.bookmaker,
       kind: 0,
       opbookmaker: "copybot",
       payload,
@@ -218,11 +219,16 @@ async function forwardCaptured(details) {
   };
 
   const safeUrl = maskUrl(details.url);
-  pushLog(`${isoNow()} [capture] kind=${kind} url=${safeUrl}`);
+  pushLog(
+    `${isoNow()} [capture] bookmaker=${target.bookmaker} kind=${target.payloadKind} url=${safeUrl}`,
+  );
 
   try {
     await ensureOffscreen();
-    dbg("send CAPTURED to offscreen", { kind });
+    dbg("send CAPTURED to offscreen", {
+      bookmaker: target.bookmaker,
+      kind: target.payloadKind,
+    });
     const res = await chrome.runtime.sendMessage({ type: "CAPTURED", msg });
     dbg("CAPTURED response", res);
   } catch (e) {
