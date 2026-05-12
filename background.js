@@ -191,56 +191,109 @@ function matchCaptureTarget(url) {
   return null;
 }
 
-async function forwardCaptured(details) {
-  const target = matchCaptureTarget(details.url);
-  if (!target) return;
-  dbg("onBeforeRequest", {
-    url: maskUrl(details.url),
-    method: details.method,
-    tabId: details.tabId,
-    hasRequestBody: Boolean(details.requestBody),
-  });
-  const settings = await getSettings();
-  if (!settings.running) {
-    dbg("skip capture: not running");
-    return;
+/**
+ * Read Gambana betslip selection links from the tab that triggered place (DOM scrape).
+ * @param {number | undefined} tabId
+ * @returns {Promise<{ slugs: string[] }>}
+ */
+async function extractGambanaBetslipSlugs(tabId) {
+  if (typeof tabId !== "number" || tabId < 0) {
+    return { slugs: [] };
   }
-
-  const payload = { ...buildPayload(details), kind: target.payloadKind };
-  const msg = {
-    type: "NEWTIP",
-    token: settings.token,
-    data: {
-      bookmaker: target.bookmaker,
-      kind: 0,
-      opbookmaker: "copybot",
-      payload,
-    },
-  };
-
-  const safeUrl = maskUrl(details.url);
-  pushLog(
-    `${isoNow()} [capture] bookmaker=${target.bookmaker} kind=${target.payloadKind} url=${safeUrl}`,
-  );
-
   try {
-    await ensureOffscreen();
-    dbg("send CAPTURED to offscreen", {
-      bookmaker: target.bookmaker,
-      kind: target.payloadKind,
+    const [injected] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const nodes = document.querySelectorAll('[data-editor-id="betslipSelection"] a[href]');
+        const slugs = [];
+        const seen = new Set();
+        for (const a of nodes) {
+          try {
+            const u = new URL(a.getAttribute("href") || a.href, document.baseURI);
+            const segments = u.pathname.split("/").filter(Boolean);
+            const last = segments[segments.length - 1];
+            if (!last) continue;
+            const slug = last.replace(/-\d{10,}$/, "") || last;
+            if (!slug || seen.has(slug)) continue;
+            seen.add(slug);
+            slugs.push(slug);
+          } catch {
+            // ignore bad href
+          }
+        }
+        return { slugs };
+      },
     });
-    const res = await chrome.runtime.sendMessage({ type: "CAPTURED", msg });
-    dbg("CAPTURED response", res);
+    const slugs = Array.isArray(injected?.result?.slugs) ? injected.result.slugs : [];
+    return { slugs };
   } catch (e) {
-    pushLog(`${isoNow()} [capture] forward failed: ${String(e)}`);
-    dbg("CAPTURED failed", String(e));
+    dbg("extractGambanaBetslipSlugs", String(e));
+    return { slugs: [] };
+  }
+}
+
+async function forwardCaptured(details) {
+  try {
+    const target = matchCaptureTarget(details.url);
+    if (!target) return;
+    dbg("onBeforeRequest", {
+      url: maskUrl(details.url),
+      method: details.method,
+      tabId: details.tabId,
+      hasRequestBody: Boolean(details.requestBody),
+    });
+    const settings = await getSettings();
+    if (!settings.running) {
+      dbg("skip capture: not running");
+      return;
+    }
+
+    const payload = { ...buildPayload(details), kind: target.payloadKind };
+    if (target.bookmaker === "gambana" && target.payloadKind === "place_bet") {
+      const { slugs } = await extractGambanaBetslipSlugs(details.tabId);
+      if (slugs.length > 0) {
+        payload.eventSlugs = slugs;
+      }
+    }
+
+    const msg = {
+      type: "NEWTIP",
+      token: settings.token,
+      data: {
+        bookmaker: target.bookmaker,
+        kind: 0,
+        opbookmaker: "copybot",
+        payload,
+      },
+    };
+
+    const safeUrl = maskUrl(details.url);
+    pushLog(
+      `${isoNow()} [capture] bookmaker=${target.bookmaker} kind=${target.payloadKind} url=${safeUrl}`,
+    );
+
+    try {
+      await ensureOffscreen();
+      dbg("send CAPTURED to offscreen", {
+        bookmaker: target.bookmaker,
+        kind: target.payloadKind,
+      });
+      const res = await chrome.runtime.sendMessage({ type: "CAPTURED", msg });
+      dbg("CAPTURED response", res);
+    } catch (e) {
+      pushLog(`${isoNow()} [capture] forward failed: ${String(e)}`);
+      dbg("CAPTURED failed", String(e));
+    }
+  } catch (e) {
+    pushLog(`${isoNow()} [capture] forwardCaptured error: ${String(e)}`);
+    dbg("forwardCaptured error", String(e));
   }
 }
 
 dbg("service worker loaded", { captureUrls: CAPTURE_URLS });
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
-    forwardCaptured(details);
+    void forwardCaptured(details);
   },
   { urls: CAPTURE_URLS },
   ["requestBody"]
