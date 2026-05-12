@@ -197,36 +197,154 @@ function matchCaptureTarget(url) {
  * @returns {Promise<{ slugs: string[] }>}
  */
 async function extractGambanaBetslipSlugs(tabId) {
+  const tag = "[gambana-slug]";
+  pushLog(`${isoNow()} ${tag} step=start tabId=${String(tabId)} typeof=${typeof tabId}`);
+
   if (typeof tabId !== "number" || tabId < 0) {
+    pushLog(
+      `${isoNow()} ${tag} step=skip_invalid_tab reason=not_a_number_or_negative tabId=${String(tabId)}`,
+    );
     return { slugs: [] };
   }
+
+  pushLog(`${isoNow()} ${tag} step=before_executeScript tabId=${tabId}`);
+
   try {
-    const [injected] = await chrome.scripting.executeScript({
-      target: { tabId },
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
       func: () => {
+        const diag = {
+          frameUrl: (() => {
+            try {
+              return String(window.location?.href ?? "").slice(0, 200);
+            } catch {
+              return "";
+            }
+          })(),
+          selectorMatchCount: 0,
+          anchorHrefSamples: /** @type {string[]} */ ([]),
+          parseErrors: /** @type {string[]} */ ([]),
+          skippedEmptyLast: 0,
+          skippedDuplicate: 0,
+          slugs: /** @type {string[]} */ ([]),
+        };
+
         const nodes = document.querySelectorAll('[data-editor-id="betslipSelection"] a[href]');
-        const slugs = [];
+        diag.selectorMatchCount = nodes.length;
+
+        let sample = 0;
         const seen = new Set();
         for (const a of nodes) {
+          const rawHref = a.getAttribute("href") || a.href || "";
+          if (sample < 5 && rawHref) {
+            diag.anchorHrefSamples.push(String(rawHref).slice(0, 240));
+            sample += 1;
+          }
           try {
-            const u = new URL(a.getAttribute("href") || a.href, document.baseURI);
+            const u = new URL(rawHref, document.baseURI);
             const segments = u.pathname.split("/").filter(Boolean);
             const last = segments[segments.length - 1];
-            if (!last) continue;
+            if (!last) {
+              diag.skippedEmptyLast += 1;
+              continue;
+            }
             const slug = last.replace(/-\d{10,}$/, "") || last;
-            if (!slug || seen.has(slug)) continue;
+            if (!slug) {
+              diag.skippedEmptyLast += 1;
+              continue;
+            }
+            if (seen.has(slug)) {
+              diag.skippedDuplicate += 1;
+              continue;
+            }
             seen.add(slug);
-            slugs.push(slug);
-          } catch {
-            // ignore bad href
+            diag.slugs.push(slug);
+          } catch (err) {
+            if (diag.parseErrors.length < 5) {
+              diag.parseErrors.push(String(err?.message || err).slice(0, 120));
+            }
           }
         }
-        return { slugs };
+        return diag;
       },
     });
-    const slugs = Array.isArray(injected?.result?.slugs) ? injected.result.slugs : [];
-    return { slugs };
+
+    if (chrome.runtime.lastError?.message) {
+      pushLog(`${isoNow()} ${tag} step=executeScript_lastError msg=${chrome.runtime.lastError.message}`);
+    }
+
+    if (!Array.isArray(results) || results.length === 0) {
+      pushLog(`${isoNow()} ${tag} step=inject_no_results (empty array or undefined)`);
+      return { slugs: [] };
+    }
+
+    pushLog(`${isoNow()} ${tag} step=inject_frame_count frames=${results.length}`);
+
+    /** @type {string[]} */
+    const mergedSlugs = [];
+    const seenMerged = new Set();
+    for (let fi = 0; fi < results.length; fi += 1) {
+      const inj = results[fi];
+      const r = inj?.result;
+      const frameLabel = `frameIdx=${fi} frameId=${inj?.frameId ?? "?"}`;
+
+      if (inj?.error) {
+        pushLog(`${isoNow()} ${tag} step=frame_inject_error ${frameLabel} err=${String(inj.error)}`);
+        continue;
+      }
+
+      if (!r || typeof r !== "object") {
+        pushLog(`${isoNow()} ${tag} step=frame_no_result ${frameLabel} resultType=${typeof r}`);
+        continue;
+      }
+
+      pushLog(
+        `${isoNow()} ${tag} step=frame_diag ${frameLabel} frameUrl=${JSON.stringify(r.frameUrl ?? "")} selectorMatchCount=${r.selectorMatchCount ?? "?"}`,
+      );
+      if (Array.isArray(r.anchorHrefSamples) && r.anchorHrefSamples.length) {
+        for (let i = 0; i < r.anchorHrefSamples.length; i += 1) {
+          pushLog(
+            `${isoNow()} ${tag} step=frame_sample_href ${frameLabel} idx=${i} href=${JSON.stringify(r.anchorHrefSamples[i])}`,
+          );
+        }
+      } else if ((r.selectorMatchCount ?? 0) === 0) {
+        pushLog(`${isoNow()} ${tag} step=frame_no_anchors ${frameLabel} selector matched 0 nodes`);
+      }
+
+      if (r.skippedEmptyLast) {
+        pushLog(`${isoNow()} ${tag} step=frame_parse_path ${frameLabel} skippedEmptyLast=${r.skippedEmptyLast}`);
+      }
+      if (r.skippedDuplicate) {
+        pushLog(`${isoNow()} ${tag} step=frame_dedupe ${frameLabel} skippedDuplicate=${r.skippedDuplicate}`);
+      }
+      if (Array.isArray(r.parseErrors) && r.parseErrors.length) {
+        pushLog(
+          `${isoNow()} ${tag} step=frame_parse_errors ${frameLabel} count=${r.parseErrors.length} first=${JSON.stringify(r.parseErrors[0])}`,
+        );
+      }
+
+      const frameSlugs = Array.isArray(r.slugs) ? r.slugs : [];
+      for (const s of frameSlugs) {
+        if (typeof s !== "string" || !s) continue;
+        if (seenMerged.has(s)) continue;
+        seenMerged.add(s);
+        mergedSlugs.push(s);
+      }
+      if (frameSlugs.length > 0) {
+        pushLog(
+          `${isoNow()} ${tag} step=frame_slugs ${frameLabel} count=${frameSlugs.length} slugs=${JSON.stringify(frameSlugs)}`,
+        );
+      }
+    }
+
+    if (mergedSlugs.length > 0) {
+      pushLog(`${isoNow()} ${tag} step=done_ok merged_count=${mergedSlugs.length} merged=${JSON.stringify(mergedSlugs)}`);
+    } else {
+      pushLog(`${isoNow()} ${tag} step=done_empty merged_slugs=[]`);
+    }
+    return { slugs: mergedSlugs };
   } catch (e) {
+    pushLog(`${isoNow()} ${tag} step=executeScript_throw err=${String(e)}`);
     dbg("extractGambanaBetslipSlugs", String(e));
     return { slugs: [] };
   }
@@ -253,6 +371,11 @@ async function forwardCaptured(details) {
       const { slugs } = await extractGambanaBetslipSlugs(details.tabId);
       if (slugs.length > 0) {
         payload.eventSlugs = slugs;
+        pushLog(
+          `${isoNow()} [gambana-slug] step=forward_payload attached eventSlugs count=${slugs.length}`,
+        );
+      } else {
+        pushLog(`${isoNow()} [gambana-slug] step=forward_payload no_eventSlugs (empty or failed)`);
       }
     }
 
