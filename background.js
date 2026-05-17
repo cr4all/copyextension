@@ -188,6 +188,10 @@ function matchCaptureTarget(url) {
   if (u.includes("sptpub.com") && u.includes("/bet/place")) {
     return { bookmaker: "gambana", payloadKind: "place_bet" };
   }
+  // Mystake sportsbook → messagetosport (createticketnew filtered in forwardCaptured)
+  if (u.includes("mystake.com") && u.includes("/api/game/p/messagetosport")) {
+    return { bookmaker: "mystake", payloadKind: "createticketnew" };
+  }
   return null;
 }
 
@@ -208,6 +212,16 @@ async function forwardCaptured(details) {
     }
 
     const payload = { ...buildPayload(details), kind: target.payloadKind };
+
+    if (target.bookmaker === "mystake") {
+      const body = payload.body;
+      if (body?.name !== "createticketnew") {
+        dbg("skip capture: mystake messagetosport without createticketnew", {
+          name: body?.name,
+        });
+        return;
+      }
+    }
 
     const msg = {
       type: "NEWTIP",
