@@ -228,7 +228,7 @@ async function forwardCaptured(details) {
       token: settings.token,
       data: {
         bookmaker: target.bookmaker,
-        kind: 0,
+        kind: target.bookmaker === "mystake" ? 1 : 0,
         opbookmaker: "copybot",
         payload,
       },

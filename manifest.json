@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Follow me (westace + gambana + mystake)",
+  "name": "Follow me (capture betting requests)",
   "version": "0.1.1",
   "description": "Capture westace, gambana (Betby), and mystake createticketnew betting requests and forward them to a Socket.IO server.",
   "action": {
