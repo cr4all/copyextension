@@ -11,6 +11,8 @@ const CAPTURE_URLS = ["<all_urls>"];
 
 /** @type {string[]} */
 let logs = [];
+/** @type {Promise<object>|null} */
+let warmupInFlight = null;
 
 function isoNow() {
   return new Date().toISOString();
@@ -288,6 +290,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         ok: true,
         running: settings.running,
         connState: offscreenState?.connState ?? "disconnected",
+        warmupInFlight: Boolean(warmupInFlight) || Boolean(offscreenState?.warmupInFlight),
         logs: [...logs, ...(Array.isArray(offscreenState?.logs) ? offscreenState.logs : [])].slice(
           -LOG_LIMIT
         ),
@@ -350,10 +353,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     if (message.type === "WARMUP") {
-      try {
+      if (warmupInFlight) {
+        pushLog(`${isoNow()} [warmup] join in-flight request`);
+        try {
+          sendResponse(await warmupInFlight);
+        } catch (e) {
+          sendResponse({ ok: false, error: String(e) });
+        }
+        return;
+      }
+      warmupInFlight = (async () => {
         await ensureOffscreen();
-        const res = await chrome.runtime.sendMessage({ type: "WARMUP" });
-        sendResponse(res ?? { ok: false, error: "no_response" });
+        return (
+          (await chrome.runtime.sendMessage({ type: "WARMUP" })) ?? {
+            ok: false,
+            error: "no_response",
+          }
+        );
+      })().finally(() => {
+        warmupInFlight = null;
+      });
+      try {
+        sendResponse(await warmupInFlight);
       } catch (e) {
         pushLog(`${isoNow()} [warmup] failed: ${String(e)}`);
         sendResponse({ ok: false, error: String(e) });

@@ -20,6 +20,8 @@ let logs = [];
 let backoffMs = 1000;
 let reconnectTimer = null;
 let lastConnState = "disconnected";
+/** @type {Promise<{ok:boolean,error?:string,count?:number,results?:unknown[],joined?:boolean}>|null} */
+let warmupInFlight = null;
 
 function isoNow() {
   return new Date().toISOString();
@@ -62,7 +64,9 @@ function pushLog(line) {
 
 function setConnState(state) {
   lastConnState = state;
-  chrome.runtime.sendMessage({ type: "STATE", connState: state, running }).catch(() => {});
+  chrome.runtime
+    .sendMessage({ type: "STATE", connState: state, running, warmupInFlight: Boolean(warmupInFlight) })
+    .catch(() => {});
 }
 
 function clearReconnectTimer() {
@@ -206,7 +210,7 @@ function stop() {
   setConnState("disconnected");
 }
 
-function requestWarmup() {
+function requestWarmupOnce() {
   if (!token) {
     return Promise.resolve({ ok: false, error: "missing_token" });
   }
@@ -253,6 +257,19 @@ function requestWarmup() {
   });
 }
 
+function requestWarmup() {
+  if (warmupInFlight) {
+    pushLog(`${isoNow()} [sio] WARMUP join in-flight request`);
+    return warmupInFlight.then((r) => ({ ...r, joined: true }));
+  }
+  warmupInFlight = requestWarmupOnce().finally(() => {
+    warmupInFlight = null;
+    setConnState(lastConnState);
+  });
+  setConnState(lastConnState);
+  return warmupInFlight;
+}
+
 function handleCaptured(msg) {
   if (!running) return;
   if (!msg || typeof msg !== "object") return;
@@ -282,6 +299,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         ok: true,
         running,
         connState: lastConnState,
+        warmupInFlight: Boolean(warmupInFlight),
         logs,
         queueSize: queue.length,
       });
@@ -314,15 +332,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     if (message.type === "WARMUP") {
       const result = await requestWarmup();
-      if (result?.ok) {
-        chrome.runtime
-          .sendMessage({
-            type: "WARMUP_ACK",
-            count: result.count,
-            results: result.results,
-          })
-          .catch(() => {});
-      }
       sendResponse(result);
       return;
     }

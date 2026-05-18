@@ -6,6 +6,8 @@ const STORAGE_KEYS = {
 
 const MAX_LOG_LINES = 500;
 
+let warmupBusy = false;
+
 function nowTime() {
   const d = new Date();
   return d.toISOString().replace("T", " ").replace("Z", "");
@@ -39,7 +41,10 @@ function updateWarmupButton(running, connState) {
   const warmupBtn = document.getElementById("warmupBtn");
   if (!warmupBtn) return;
   const connected = String(connState ?? "").toLowerCase() === "connected";
-  warmupBtn.disabled = !running || !connected;
+  warmupBtn.disabled = !running || !connected || warmupBusy;
+  warmupBtn.title = warmupBusy
+    ? "Warmup in progress…"
+    : "Refresh bot sessions before copy betting";
 }
 
 async function getStoredSettings() {
@@ -95,6 +100,14 @@ async function init() {
   if (Array.isArray(state?.logs)) {
     for (const line of state.logs) appendLog(line);
   }
+  if (state?.warmupInFlight) {
+    warmupBusy = true;
+    appendLog(`${nowTime()} [ui] warmup already in progress`);
+    updateWarmupButton(
+      state?.running !== undefined ? Boolean(state.running) : settings.running,
+      state?.connState ?? "disconnected",
+    );
+  }
 
   startBtn.addEventListener("click", async () => {
     const wsUrl = wsUrlEl.value.trim();
@@ -135,9 +148,21 @@ async function init() {
   });
 
   warmupBtn.addEventListener("click", async () => {
-    warmupBtn.disabled = true;
+    if (warmupBusy) {
+      appendLog(`${nowTime()} [ui] warmup already in progress`);
+      return;
+    }
+    warmupBusy = true;
+    const preState = await sendMessage({ type: "GET_STATE" });
+    updateWarmupButton(
+      preState?.running !== undefined ? Boolean(preState.running) : settings.running,
+      preState?.connState ?? "disconnected",
+    );
     appendLog(`${nowTime()} [ui] warmup requested`);
     const res = await sendMessage({ type: "WARMUP" });
+    if (res?.joined) {
+      appendLog(`${nowTime()} [ui] warmup joined in-flight run`);
+    }
     if (res?.ok) {
       const results = Array.isArray(res.results) ? res.results : [];
       const readyCount = results.filter((r) => r?.ready).length;
@@ -156,6 +181,7 @@ async function init() {
     } else {
       appendLog(`${nowTime()} [ui] warmup failed: ${res?.error ?? "unknown"}`);
     }
+    warmupBusy = false;
     const state = await sendMessage({ type: "GET_STATE" });
     updateWarmupButton(Boolean(state?.running), state?.connState ?? "disconnected");
   });
@@ -168,18 +194,13 @@ async function init() {
     }
     if (msg.type === "STATE") {
       if (typeof msg.running === "boolean") setRunningUI(msg.running);
+      if (typeof msg.warmupInFlight === "boolean") warmupBusy = msg.warmupInFlight;
       if (typeof msg.connState === "string") {
         setConnState(msg.connState);
         const badge = document.getElementById("statusBadge");
         const running = badge?.textContent === "running";
         updateWarmupButton(running, msg.connState);
       }
-    }
-    if (msg.type === "WARMUP_ACK") {
-      const results = Array.isArray(msg.results) ? msg.results : [];
-      appendLog(
-        `${nowTime()} [sio] warmup_ack: ${results.filter((r) => r?.ready).length}/${results.length} ready`,
-      );
     }
   });
 }
