@@ -35,6 +35,13 @@ function setConnState(text) {
   document.getElementById("connState").textContent = text ?? "—";
 }
 
+function updateWarmupButton(running, connState) {
+  const warmupBtn = document.getElementById("warmupBtn");
+  if (!warmupBtn) return;
+  const connected = String(connState ?? "").toLowerCase() === "connected";
+  warmupBtn.disabled = !running || !connected;
+}
+
 async function getStoredSettings() {
   const stored = await chrome.storage.local.get([
     STORAGE_KEYS.wsUrl,
@@ -71,6 +78,7 @@ async function init() {
   const startBtn = document.getElementById("startBtn");
   const stopBtn = document.getElementById("stopBtn");
   const clearBtn = document.getElementById("clearLogBtn");
+  const warmupBtn = document.getElementById("warmupBtn");
 
   const settings = await getStoredSettings();
   wsUrlEl.value = settings.wsUrl;
@@ -80,6 +88,10 @@ async function init() {
   const state = await sendMessage({ type: "GET_STATE" });
   if (state?.running !== undefined) setRunningUI(Boolean(state.running));
   if (state?.connState) setConnState(state.connState);
+  updateWarmupButton(
+    state?.running !== undefined ? Boolean(state.running) : settings.running,
+    state?.connState ?? "disconnected",
+  );
   if (Array.isArray(state?.logs)) {
     for (const line of state.logs) appendLog(line);
   }
@@ -96,6 +108,7 @@ async function init() {
     if (res?.ok) {
       appendLog(`${nowTime()} [ui] started`);
       setRunningUI(true);
+      updateWarmupButton(true, (await sendMessage({ type: "GET_STATE" }))?.connState);
     } else {
       appendLog(`${nowTime()} [ui] start failed: ${res?.error ?? "unknown"}`);
       setRunningUI(false);
@@ -113,11 +126,38 @@ async function init() {
     }
     setRunningUI(false);
     setConnState("disconnected");
+    updateWarmupButton(false, "disconnected");
   });
 
   clearBtn.addEventListener("click", async () => {
     document.getElementById("logBox").textContent = "";
     await sendMessage({ type: "CLEAR_LOGS" });
+  });
+
+  warmupBtn.addEventListener("click", async () => {
+    warmupBtn.disabled = true;
+    appendLog(`${nowTime()} [ui] warmup requested`);
+    const res = await sendMessage({ type: "WARMUP" });
+    if (res?.ok) {
+      const results = Array.isArray(res.results) ? res.results : [];
+      const readyCount = results.filter((r) => r?.ready).length;
+      appendLog(
+        `${nowTime()} [ui] warmup done: ${readyCount}/${results.length} ready`,
+      );
+      for (const r of results) {
+        const bal =
+          r?.balance != null && Number.isFinite(Number(r.balance))
+            ? ` balance=${r.balance}`
+            : "";
+        appendLog(
+          `${nowTime()} [warmup] ${r?.bookmaker ?? "?"} ${r?.botInstanceId ?? "?"} ready=${Boolean(r?.ready)}${bal}${r?.error ? ` err=${r.error}` : ""}`,
+        );
+      }
+    } else {
+      appendLog(`${nowTime()} [ui] warmup failed: ${res?.error ?? "unknown"}`);
+    }
+    const state = await sendMessage({ type: "GET_STATE" });
+    updateWarmupButton(Boolean(state?.running), state?.connState ?? "disconnected");
   });
 
   chrome.runtime.onMessage.addListener((msg) => {
@@ -128,7 +168,18 @@ async function init() {
     }
     if (msg.type === "STATE") {
       if (typeof msg.running === "boolean") setRunningUI(msg.running);
-      if (typeof msg.connState === "string") setConnState(msg.connState);
+      if (typeof msg.connState === "string") {
+        setConnState(msg.connState);
+        const badge = document.getElementById("statusBadge");
+        const running = badge?.textContent === "running";
+        updateWarmupButton(running, msg.connState);
+      }
+    }
+    if (msg.type === "WARMUP_ACK") {
+      const results = Array.isArray(msg.results) ? msg.results : [];
+      appendLog(
+        `${nowTime()} [sio] warmup_ack: ${results.filter((r) => r?.ready).length}/${results.length} ready`,
+      );
     }
   });
 }

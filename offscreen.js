@@ -6,6 +6,8 @@ const QUEUE_LIMIT = 200;
 // Socket.IO emits the captured NEWTIP message using this event name.
 // If your server expects a different event, change this constant.
 const SOCKET_EVENT = "NEWTIP";
+const WARMUP_EVENT = "WARMUP";
+const WARMUP_TIMEOUT_MS = 300000;
 
 let socket = null;
 let serverUrl = "";
@@ -204,6 +206,53 @@ function stop() {
   setConnState("disconnected");
 }
 
+function requestWarmup() {
+  if (!token) {
+    return Promise.resolve({ ok: false, error: "missing_token" });
+  }
+  if (!isSocketConnected()) {
+    return Promise.resolve({ ok: false, error: "not_connected" });
+  }
+
+  return new Promise((resolve) => {
+    const onAck = (payload) => {
+      if (String(payload?.type || "").toUpperCase() !== "WARMUP") return;
+      cleanup();
+      resolve({
+        ok: Boolean(payload?.ok),
+        count: payload?.count,
+        results: payload?.results,
+      });
+    };
+    const onError = (payload) => {
+      if (String(payload?.type || "").toUpperCase() !== "WARMUP") return;
+      cleanup();
+      resolve({ ok: false, error: payload?.error || "warmup_error" });
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve({ ok: false, error: "warmup_timeout" });
+    }, WARMUP_TIMEOUT_MS);
+
+    function cleanup() {
+      clearTimeout(timer);
+      socket?.off("warmup_ack", onAck);
+      socket?.off("error", onError);
+    }
+
+    socket.once("warmup_ack", onAck);
+    socket.once("error", onError);
+
+    try {
+      socket.emit(WARMUP_EVENT, { type: "WARMUP", token, data: {} });
+      pushLog(`${isoNow()} [sio] WARMUP sent`);
+    } catch (e) {
+      cleanup();
+      resolve({ ok: false, error: String(e) });
+    }
+  });
+}
+
 function handleCaptured(msg) {
   if (!running) return;
   if (!msg || typeof msg !== "object") return;
@@ -260,6 +309,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === "CLEAR_LOGS") {
       logs = [];
       sendResponse({ ok: true });
+      return;
+    }
+
+    if (message.type === "WARMUP") {
+      const result = await requestWarmup();
+      if (result?.ok) {
+        chrome.runtime
+          .sendMessage({
+            type: "WARMUP_ACK",
+            count: result.count,
+            results: result.results,
+          })
+          .catch(() => {});
+      }
+      sendResponse(result);
       return;
     }
 

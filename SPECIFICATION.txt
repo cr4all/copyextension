@@ -180,5 +180,12 @@ Recommended architecture:
 ### 9.3 Security / masking
 - When `token` appears in query/body, confirm the UI log shows masked values only.
 
-## 10. Future work (out of scope)
+## 10. Warmup (bot session refresh)
+- **UI**: `Warmup` button (enabled when `running` and Socket.IO `connected`).
+- **Client emit**: Socket.IO event `WARMUP` with body `{ type: "WARMUP", token, data: {} }` (same token as NEWTIP).
+- **Server ack**: event `warmup_ack` with `{ type: "WARMUP", ok, count, results: [{ botInstanceId, bookmaker, ready, balance?, error? }] }`.
+- **HTTP alternative**: `POST /warmup` on mainbot with the same JSON body.
+- **Operator note**: wait 5–10 minutes after a successful warmup before copy betting.
+
+## 11. Future work (out of scope)
 - Other bookmakers, multiple Socket.IO destinations, collecting response bodies (not in scope now)

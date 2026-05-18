@@ -349,6 +349,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return;
     }
 
+    if (message.type === "WARMUP") {
+      try {
+        await ensureOffscreen();
+        const res = await chrome.runtime.sendMessage({ type: "WARMUP" });
+        sendResponse(res ?? { ok: false, error: "no_response" });
+      } catch (e) {
+        pushLog(`${isoNow()} [warmup] failed: ${String(e)}`);
+        sendResponse({ ok: false, error: String(e) });
+      }
+      return;
+    }
+
     sendResponse({ ok: false, error: "unknown_type" });
   })();
   return true;

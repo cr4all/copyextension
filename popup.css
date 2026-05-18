@@ -112,6 +112,19 @@ body {
   color: var(--muted);
 }
 
+.btn--warmup {
+  width: 100%;
+  background: rgba(45, 212, 191, 0.15);
+  border-color: rgba(45, 212, 191, 0.45);
+}
+
+.hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
 .log {
   border: 1px solid var(--border);
   border-radius: 12px;
